@@ -342,6 +342,8 @@
   let ballSelected = false;
   let currentPlayName = null;
   let currentPlayId = null;
+  let dribbleDragPlayer = null;
+  let lastTapTime = 0, lastTapPos = null;
   function nextAvailableNum(team){
     const used = new Set(players.filter(p=>p.team===team).map(p=>p.num));
     for(let n=1;n<=5;n++){ if(!used.has(n)) return n; }
@@ -473,9 +475,10 @@
       ctx.strokeStyle = (p.id===selectedPlayerId) ? '#e8a33d' : '#1c2430';
       ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.font = '700 14px Inter, sans-serif';
+      const label = String(p.num);
+      ctx.font = (label.length>2 ? '700 10px' : '700 14px') + ' Inter, sans-serif';
       ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(p.num, p.x, p.y+1);
+      ctx.fillText(label, p.x, p.y+1);
     });
     if(ball){
       ctx.beginPath();
@@ -530,18 +533,28 @@
     else ctx.setLineDash([]);
 
     if(type==='dribble'){
+      // Ona contínua basada en la distància recorreguda sobre tot el traçat
+      // (no reiniciada a cada punt capturat del ratolí), perquè es vegi sempre
+      // clara sense dependre de la velocitat/mostreig de l'arrossegament.
+      const AMPLITUDE = 5.5, WAVELEN = 16, STEP = 4;
       ctx.beginPath();
+      let dist = 0, first = true;
       for(let i=0;i<pts.length-1;i++){
         const [x1,y1]=pts[i], [x2,y2]=pts[i+1];
-        const segLen = Math.hypot(x2-x1,y2-y1) || 1;
-        const steps = Math.max(2, Math.floor(segLen/14));
+        const segLen = Math.hypot(x2-x1,y2-y1);
+        if(segLen < 0.001) continue;
+        const ux = (x2-x1)/segLen, uy = (y2-y1)/segLen;
+        const nx = -uy, ny = ux;
+        const steps = Math.max(1, Math.ceil(segLen/STEP));
         for(let s=0;s<=steps;s++){
-          const t=s/steps;
-          const x=x1+(x2-x1)*t, y=y1+(y2-y1)*t;
-          const off = Math.sin(t*Math.PI*4)*5;
-          const nx = -(y2-y1)/segLen*off, ny=(x2-x1)/segLen*off;
-          if(s===0 && i===0) ctx.moveTo(x+nx,y+ny); else ctx.lineTo(x+nx,y+ny);
+          if(s===0 && i>0) continue;
+          const t = s/steps;
+          const x = x1+(x2-x1)*t, y = y1+(y2-y1)*t;
+          const off = Math.sin((dist+segLen*t)/WAVELEN*Math.PI*2)*AMPLITUDE;
+          const wx = x+nx*off, wy = y+ny*off;
+          if(first){ ctx.moveTo(wx,wy); first=false; } else { ctx.lineTo(wx,wy); }
         }
+        dist += segLen;
       }
       ctx.stroke();
     } else {
@@ -697,6 +710,13 @@
         else { texts = texts.filter(t=> Math.hypot(t.x-x,t.y-y) > 16); }
       }
       render();
+    } else if(mode==='dribble' && selectedPlayerId){
+      const p = players.find(pl=>pl.id===selectedPlayerId);
+      if(p){
+        pushHistory();
+        dribbleDragPlayer = p;
+        drawingArrow = {type:'dribble', pts:[[p.x,p.y]]};
+      }
     } else if(['move','pass','screen','dribble','shot','handoff'].includes(mode)){
       drawingArrow = {type:mode, pts:[[x,y]]};
     } else if(mode==='path'){
@@ -714,23 +734,60 @@
   canvas.addEventListener('mousemove', e=>{
     const [x,y] = pos(e);
     if(dragTarget){ dragTarget.x=x; dragTarget.y=y; render(); }
-    else if(drawingArrow){ drawingArrow.pts.push([x,y]); render(); }
+    else if(drawingArrow){
+      drawingArrow.pts.push([x,y]);
+      if(dribbleDragPlayer){
+        dribbleDragPlayer.x=x; dribbleDragPlayer.y=y;
+        if(ball){ ball.x=x; ball.y=y; }
+      }
+      render();
+    }
     else if(tracingPathFor){ paths[tracingPathFor].push([x,y]); render(); }
   });
   function endStroke(){
     if(drawingArrow){
-      if(drawingArrow.pts.length>1){ pushHistory(); arrows.push(drawingArrow); }
+      if(drawingArrow.pts.length>1){
+        if(!dribbleDragPlayer) pushHistory();
+        arrows.push(drawingArrow);
+      }
       drawingArrow=null;
     }
-    dragTarget=null; tracingPathFor=null;
+    dragTarget=null; tracingPathFor=null; dribbleDragPlayer=null;
     render();
   }
   canvas.addEventListener('mouseup', endStroke);
   canvas.addEventListener('mouseleave', endStroke);
-  canvas.addEventListener('touchstart', e=>{e.preventDefault(); canvas.dispatchEvent(new MouseEvent('mousedown', toMouseInit(e)));}, {passive:false});
+  canvas.addEventListener('touchstart', e=>{
+    e.preventDefault();
+    const [tx,ty] = pos(e);
+    if(maybeHandleDoubleTap(tx,ty)) return;
+    canvas.dispatchEvent(new MouseEvent('mousedown', toMouseInit(e)));
+  }, {passive:false});
   canvas.addEventListener('touchmove', e=>{e.preventDefault(); canvas.dispatchEvent(new MouseEvent('mousemove', toMouseInit(e)));}, {passive:false});
   canvas.addEventListener('touchend', e=>{e.preventDefault(); endStroke();}, {passive:false});
   function toMouseInit(e){ const t = e.touches[0] || e.changedTouches[0]; return {clientX:t.clientX, clientY:t.clientY}; }
+
+  function renamePlayerAt(x,y){
+    const hp = hitPlayer(x,y);
+    if(!hp) return;
+    const nou = prompt('Nom o dorsal de la jugadora:', String(hp.num));
+    if(nou !== null && nou.trim() !== ''){
+      pushHistory();
+      hp.num = nou.trim();
+      render();
+    }
+  }
+  function maybeHandleDoubleTap(x,y){
+    const now = Date.now();
+    if(lastTapPos && (now-lastTapTime) < 350 && Math.hypot(x-lastTapPos[0], y-lastTapPos[1]) < 20){
+      renamePlayerAt(x,y);
+      lastTapTime = 0; lastTapPos = null;
+      return true;
+    }
+    lastTapTime = now; lastTapPos = [x,y];
+    return false;
+  }
+  canvas.addEventListener('dblclick', e=>{ const [x,y] = pos(e); renamePlayerAt(x,y); });
 
   let pendingTextPos = null;
   function openTextModal(x,y){
@@ -997,17 +1054,26 @@
     commitCurrentFrame();
     return { courtType, frames: clone(frames) };
   }
+  // Firestore no permet arrays niats (array dins d'array), i 'frames' en conté
+  // (punts [x,y] dins de fletxes/recorreguts). Es guarda com a JSON serialitzat.
+  function getFramesFromDoc(d){
+    if(d && d.framesJson){
+      try{ return JSON.parse(d.framesJson); }catch(e){ return []; }
+    }
+    return (d && d.frames) || [];
+  }
   function applyPlay(s){
     courtType = s.courtType || 'half';
     const [w,h] = sizes[courtType]; canvas.width=w; canvas.height=h;
     document.getElementById('btnHalf').classList.toggle('active', courtType==='half');
     document.getElementById('btnFull').classList.toggle('active', courtType==='full');
-    frames = clone(s.frames && s.frames.length ? s.frames : [emptyFrame()]);
+    const parsedFrames = getFramesFromDoc(s);
+    frames = clone(parsedFrames.length ? parsedFrames : [emptyFrame()]);
     loadFrame(0);
   }
   function nameKeyedPlays(){
     const out = {};
-    Object.values(playsCache).forEach(d=>{ out[d.name] = { courtType:d.courtType, frames:d.frames }; });
+    Object.values(playsCache).forEach(d=>{ out[d.name] = { courtType:d.courtType, frames:getFramesFromDoc(d) }; });
     return out;
   }
 
@@ -1031,7 +1097,7 @@
     list.innerHTML = '';
     document.getElementById('emptyNote').style.display = entries.length ? 'none' : 'block';
     entries.forEach(([id, data])=>{
-      const nFrames = (data.frames||[]).length;
+      const nFrames = getFramesFromDoc(data).length;
       const div = document.createElement('div');
       div.className = 'play-item' + (id===currentPlayId ? ' current' : '');
       div.innerHTML = '<span class="name">'+data.name+'</span><span class="meta">'+nFrames+' acc.</span>'
@@ -1059,7 +1125,11 @@
   document.getElementById('btnSave').onclick = async ()=>{
     const name = document.getElementById('playName').value.trim();
     if(!name){ alert('Posa un nom a la jugada abans de desar-la.'); return; }
-    const data = Object.assign({name}, snapshotPlay(), {updatedAt: firebase.firestore.FieldValue.serverTimestamp()});
+    const snap = snapshotPlay();
+    const data = {
+      name, courtType: snap.courtType, framesJson: JSON.stringify(snap.frames),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
     try{
       const existing = Object.entries(playsCache).find(([id,d])=> d.name===name);
       if(existing){
@@ -1097,7 +1167,10 @@
         const incoming = JSON.parse(reader.result);
         const entries = Object.entries(incoming);
         for(const [name, playData] of entries){
-          const data = Object.assign({name}, {courtType:playData.courtType, frames:playData.frames}, {updatedAt: firebase.firestore.FieldValue.serverTimestamp()});
+          const data = {
+            name, courtType: playData.courtType, framesJson: JSON.stringify(playData.frames || []),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+          };
           const existing = Object.entries(playsCache).find(([id,d])=> d.name===name);
           if(existing) await playsCol.doc(existing[0]).set(data);
           else await playsCol.add(data);
